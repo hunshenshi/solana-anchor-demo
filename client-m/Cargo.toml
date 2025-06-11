@@ -1,0 +1,11 @@
+[package]
+name = "client-m"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anchor-client = { version = "0.31.1", features = ["async"] }
+anchor-spl = { version = "0.31.1", features = ["metadata", "token", "associated_token"] }
+anchor-lang = "0.31.1"
+anyhow = "1.0.93"
+tokio = { version = "1.0", features = ["full"] }
