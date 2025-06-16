@@ -54,6 +54,7 @@ pub mod nft {
 #[derive(Accounts)]
 pub struct MintNFT<'info> {
     /// CHECK: New Metaplex Account being created
+    #[account(mut)]
     pub metadata: UncheckedAccount<'info>,
     #[account(init, payer = payer, mint::decimals = 0, mint::authority = payer.key())]
     pub mint: Account<'info, Mint>,
