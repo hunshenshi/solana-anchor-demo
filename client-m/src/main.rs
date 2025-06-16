@@ -6,16 +6,50 @@ use anchor_client::{
     Client, Cluster,
 };
 use anchor_lang::prelude::*;
-use anchor_spl::{associated_token::get_associated_token_address, metadata::mpl_token_metadata};
+use anchor_spl::{associated_token::get_associated_token_address, metadata::{self, mpl_token_metadata}};
 use std::{ops::Deref, sync::Arc};
+use clap::{Parser, Subcommand};
 
 declare_program!(token);
-use token::{client::accounts, client::args};
+declare_program!(nft);
+use token::{client::accounts as token_accounts, client::args as token_args};
+use nft::{client::accounts as nft_accounts, client::args as nft_args};
 
-use crate::token::types::CreateTokenParams;
+use crate::{nft::types::MintNFTParams, token::types::CreateTokenParams};
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Create and mint token
+    Token {
+        /// Amount to mint
+        #[arg(short, long, default_value_t = 1000000000)]
+        amount: u64,
+    },
+    /// Mint NFT
+    Nft {
+        /// NFT name
+        #[arg(short, long)]
+        name: String,
+        /// NFT symbol
+        #[arg(short, long)]
+        symbol: String,
+        /// NFT URI
+        #[arg(short, long)]
+        uri: String,
+    },
+}
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()>{
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    
     let connection = RpcClient::new_with_commitment(
         "https://api.devnet.solana.com",
         CommitmentConfig::confirmed(),
@@ -37,32 +71,87 @@ async fn main() -> anyhow::Result<()>{
         payer.clone(),
         CommitmentConfig::confirmed(),
     );
-    let program = provider.program(token::ID)?;
-    
-    println!("\nSend transaction with create_token and mint_token instructions");
 
-    let create_token_ix = create_token_instruction(&program).await?;
-    let mint_token_ix = mint_token_instruction(&program, 10000000000000).await?;
+    match cli.command {
+        Commands::Token { amount } => {
+            let program = provider.program(token::ID)?;
+            println!("\nExecuting token program...");
+            
+            let create_token_ix = create_token_instruction(&program).await?;
+            let mint_token_ix = mint_token_instruction(&program, amount).await?;
 
-    let signature = program
-        .request()
-        // .instruction(create_token_ix)
-        .instruction(mint_token_ix)
-        .signer(payer.clone())
-        .send()
-        .await?;
-    println!("Transaction confirmed: {}", signature);
+            let signature = program
+                .request()
+                .instruction(create_token_ix)
+                .instruction(mint_token_ix)
+                .signer(payer.clone())
+                .send()
+                .await?;
+            println!("Token transaction confirmed: {}", signature);
 
-    let mint = Pubkey::find_program_address(&["mint".as_bytes(), "tick".as_bytes()], &program.id()).0;
-    let destination = get_associated_token_address(&program.payer(), &mint);
+            let mint = Pubkey::find_program_address(&["mint".as_bytes(), "tick".as_bytes()], &program.id()).0;
+            let destination = get_associated_token_address(&program.payer(), &mint);
 
-    // Get token account balance
-    let token_account = connection.get_token_account(&destination)?.unwrap();
-    println!("Token balance: {}", token_account.token_amount.amount);
-    println!("Token account owner: {}", token_account.owner);
-    println!("Token mint: {}", token_account.mint);
+            let token_account = connection.get_token_account(&destination)?.unwrap();
+            println!("Token balance: {}", token_account.token_amount.amount);
+        }
+        Commands::Nft { name, symbol, uri } => {
+            let program = provider.program(nft::ID)?;
+            println!("\nExecuting NFT program...");
+            
+            // Create a new mint account for NFT
+            let mint_account = Arc::new(Keypair::new());
+            println!("mint_account: {}", mint_account.pubkey());
+            println!("mint_account private key: {:?}", mint_account.to_bytes());
+            println!("mint_account base58: {}", bs58::encode(mint_account.to_bytes()).into_string());
+
+            let mint_nft_ix = mint_nft_instruction(&program, mint_account.pubkey(), name, symbol, uri).await?;
+
+            let signature = program
+                .request()
+                .instruction(mint_nft_ix)
+                .signer(payer.clone())
+                .signer(mint_account.clone())
+                .send()
+                .await?;
+            println!("NFT transaction confirmed: {}", signature);
+        }
+    }
 
     Ok(())
+}
+
+async fn mint_nft_instruction<C: Deref<Target = impl Signer> + Clone>(program: &anchor_client::Program<C>, mint_account: Pubkey, name: String, symbol: String, uri: String) -> anyhow::Result<Instruction> {
+    let metadata_seeds = &["metadata".as_bytes(), mpl_token_metadata::ID.as_ref(), mint_account.as_ref()];
+    let metadata = Pubkey::find_program_address(metadata_seeds, &mpl_token_metadata::ID).0;
+
+    let destination = get_associated_token_address(&program.payer(),  &mint_account);
+
+    let mint_nft_ix = program
+        .request()
+        .accounts(nft_accounts::MintNft{
+            metadata: metadata,
+            mint: mint_account,
+            destination: destination,
+            payer: program.payer(),
+            rent: anchor_lang::solana_program::sysvar::rent::ID,
+            system_program: system_program::ID,
+            token_program: anchor_spl::token::ID,
+            metadata_program: mpl_token_metadata::ID,
+            associated_token_program: anchor_spl::associated_token::ID,
+        })
+        .args(nft_args::MintNft{
+            nft_params: MintNFTParams {
+                name: name,
+                symbol: symbol,
+                uri: uri,
+            }
+
+        })
+        .instructions()?
+        .remove(0);
+
+    Ok(mint_nft_ix)
 }
 
 async fn create_token_instruction<C: Deref<Target = impl Signer> + Clone>(program: &anchor_client::Program<C>) -> anyhow::Result<Instruction> {
@@ -72,7 +161,7 @@ async fn create_token_instruction<C: Deref<Target = impl Signer> + Clone>(progra
     
     let create_token_ix = program
         .request()
-        .accounts(accounts::CreateToken {
+        .accounts(token_accounts::CreateToken {
             metadata: metadata,
             mint: mint,
             payer: program.payer(),
@@ -81,7 +170,7 @@ async fn create_token_instruction<C: Deref<Target = impl Signer> + Clone>(progra
             token_program: anchor_spl::token::ID,
             metadata_program: mpl_token_metadata::ID,
         })
-        .args(args::CreateToken {
+        .args(token_args::CreateToken {
             matedata: CreateTokenParams {
                 name: "My Token".to_string(),
                 symbol: "MTK".to_string(),
@@ -102,7 +191,7 @@ async fn mint_token_instruction<C: Deref<Target = impl Signer> + Clone>(program:
 
     let mint_token_ix = program
         .request()
-        .accounts(accounts::MintToken {
+        .accounts(token_accounts::MintToken {
             mint: mint,
             destination: destination,
             payer: program.payer(),
@@ -110,7 +199,7 @@ async fn mint_token_instruction<C: Deref<Target = impl Signer> + Clone>(program:
             token_program: anchor_spl::token::ID,
             associated_token_program: anchor_spl::associated_token::ID,
         })
-        .args(args::MintToken {
+        .args(token_args::MintToken {
             amount: amount,
         })
         .instructions()?

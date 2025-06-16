@@ -21,7 +21,8 @@
       ],
       "accounts": [
         {
-          "name": "metadata"
+          "name": "metadata",
+          "writable": true
         },
         {
           "name": "mint",
